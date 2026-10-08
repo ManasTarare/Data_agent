@@ -328,71 +328,6 @@ async function pollLog() {
   }
 }
 
-function deltaClass(key, value) {
-  if (value === 0 || value === null) {
-    return "delta-neutral";
-  }
-
-  const lowerIsBetter = [
-    "temperature_c",
-    "utilization",
-    "carbon_g_per_kwh",
-    "electricity_price",
-  ];
-
-  const good = lowerIsBetter.includes(key)
-    ? value < 0
-    : value > 0;
-
-  return good
-    ? "delta-good"
-    : "delta-bad";
-}
-
-async function pollFeedback() {
-  try {
-    const response = await fetch("/api/feedback", {
-      cache: "no-store",
-    });
-
-    const data = await response.json();
-    const list = document.getElementById("feedbackList");
-
-    if (!data.entries.length) {
-      list.innerHTML =
-        '<div class="log-empty">Outcomes appear ~30s after actions.</div>';
-      return;
-    }
-
-    list.innerHTML = data.entries.map((entry) => {
-      const deltas = entry.delta
-        ? Object.entries(entry.delta)
-          .map(([key, value]) => {
-            const sign = value > 0 ? "+" : "";
-
-            return `
-              <span class="delta-chip ${deltaClass(key, value)}">
-                ${escapeHtml(key)} ${sign}${value}
-              </span>
-            `;
-          })
-          .join("")
-        : "";
-
-      return `
-        <div class="feedback-entry">
-          <div class="feedback-action">
-            ${escapeHtml(entry.action)} → ${escapeHtml(entry.target || "—")}
-          </div>
-          <div class="feedback-deltas">${deltas}</div>
-        </div>
-      `;
-    }).join("");
-  } catch (error) {
-    // Retry during next scheduled poll.
-  }
-}
-
 document.getElementById("askBtn").addEventListener(
   "click",
   async () => {
@@ -435,8 +370,6 @@ document.getElementById("askInput").addEventListener(
 
 pollState();
 pollLog();
-pollFeedback();
 
 setInterval(pollState, 1000);
 setInterval(pollLog, 2500);
-setInterval(pollFeedback, 5000);

@@ -247,11 +247,17 @@ class DatacenterAgent:
         self.decision_interval = decision_interval
         self.llm = LLMClient()
 
+        # Runtime-adjustable settings (changed from the admin Settings tab).
+        self.temp_threshold_c = TEMP_THRESHOLD_C
+        self.util_imbalance_threshold = UTIL_IMBALANCE_THRESHOLD
+        self.min_net_profit = MIN_NET_PROFIT
+
         self.decision_log: list[dict] = []
 
         self._running = False
         self._stop_event = threading.Event()
         self._log_lock = threading.Lock()
+        self._next_capture_at = None  # monotonic time of the next decision
 
     def _add_log_entry(self, entry: dict):
         with self._log_lock:
@@ -288,7 +294,7 @@ You receive a frozen telemetry snapshot every {self.decision_interval} seconds.
 
 Decision priority:
 
-1. If a chipset is hotter than {TEMP_THRESHOLD_C}C:
+1. If a chipset is hotter than {self.temp_threshold_c}C:
    move one eligible task to a cooler chipset on the same server using
    "shift_within_server".
 
@@ -296,11 +302,11 @@ Decision priority:
    the same region has enough capacity, OR if utilization is badly
    imbalanced across servers in the same region (the busiest server's
    average utilization minus the least-busy server's average utilization
-   is greater than {UTIL_IMBALANCE_THRESHOLD}):
+   is greater than {self.util_imbalance_threshold}):
    use "shift_within_region" to move one task toward the less-loaded server.
 
 3. If another region is cheaper or greener and:
-   projected_savings - bandwidth_cost_estimate > {MIN_NET_PROFIT}
+   projected_savings - bandwidth_cost_estimate > {self.min_net_profit}
    use "migrate_region".
 
 4. If no safe and useful action is needed:
@@ -495,7 +501,7 @@ Action parameter requirements:
             params.pop("min_net_profit", None)
             outcome = self.env.migrate_region(
                 **params,
-                min_net_profit=MIN_NET_PROFIT,
+                min_net_profit=self.min_net_profit,
             )
 
         else:
@@ -515,8 +521,19 @@ Action parameter requirements:
         }
 
     def run_forever(self):
+        if self._running:
+            return
+
         self._running = True
-        self._stop_event.clear()
+        stop_event = threading.Event()
+        self._stop_event = stop_event
+
+        # Start a clean buffer window: whatever telemetry piled up while the
+        # agent was paused is dropped, and the countdown starts from now.
+        try:
+            self.env.swap_buffers()
+        except Exception:
+            pass
 
         def process_snapshot(
             buffer_snapshot: list[dict],
@@ -543,13 +560,15 @@ Action parameter requirements:
                 + self.decision_interval
             )
 
-            while self._running:
+            self._next_capture_at = next_capture_at
+
+            while not stop_event.is_set():
                 wait_seconds = max(
                     0,
                     next_capture_at - time.monotonic(),
                 )
 
-                if self._stop_event.wait(wait_seconds):
+                if stop_event.wait(wait_seconds):
                     break
 
                 # Freeze exactly one telemetry interval every 20 seconds.
@@ -570,6 +589,7 @@ Action parameter requirements:
 
                 # Keep the scheduler aligned to a fixed 20-second clock.
                 next_capture_at += self.decision_interval
+                self._next_capture_at = next_capture_at
 
         threading.Thread(
             target=scheduler,
@@ -578,4 +598,64 @@ Action parameter requirements:
 
     def stop(self):
         self._running = False
+        self._next_capture_at = None
         self._stop_event.set()
+
+    # ---- Admin controls -------------------------------------------------
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def seconds_until_next_decision(self) -> int:
+        """Real countdown to the next decision (0 while paused)."""
+        at = self._next_capture_at
+        if not self._running or at is None:
+            return 0
+        return max(0, int(round(at - time.monotonic())))
+
+    def pause(self):
+        """Stops the scheduler. A decision already in flight may still finish."""
+        self.stop()
+
+    def resume(self):
+        """Starts the scheduler; the first decision comes one full interval later."""
+        self.run_forever()
+
+    def get_settings(self) -> dict:
+        return {
+            "temp_threshold_c": self.temp_threshold_c,
+            "util_imbalance_threshold": self.util_imbalance_threshold,
+            "min_net_profit": self.min_net_profit,
+            "decision_interval_seconds": self.decision_interval,
+        }
+
+    def update_settings(self, values: dict) -> dict:
+        """Validates and applies any subset of the settings. Raises ValueError."""
+        checks = {
+            "temp_threshold_c": (float, 30, 120),
+            "util_imbalance_threshold": (float, 0, 1),
+            "min_net_profit": (float, -1e9, 1e9),
+            "decision_interval_seconds": (int, 5, 600),
+        }
+        clean = {}
+        for key, (kind, low, high) in checks.items():
+            if key not in values or values[key] is None:
+                continue
+            try:
+                value = kind(values[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number")
+            if not (low <= value <= high):
+                raise ValueError(f"{key} must be between {low} and {high}")
+            clean[key] = value
+
+        if "temp_threshold_c" in clean:
+            self.temp_threshold_c = clean["temp_threshold_c"]
+        if "util_imbalance_threshold" in clean:
+            self.util_imbalance_threshold = clean["util_imbalance_threshold"]
+        if "min_net_profit" in clean:
+            self.min_net_profit = clean["min_net_profit"]
+        if "decision_interval_seconds" in clean:
+            self.decision_interval = clean["decision_interval_seconds"]
+        return self.get_settings()

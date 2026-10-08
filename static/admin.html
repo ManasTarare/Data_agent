@@ -5,63 +5,34 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Admin — Grid Control</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css?v=2" />
-<style>
-  .auth-shell {
-    max-width: 380px;
-    margin: 12vh auto;
-    padding: 28px;
-  }
-  .auth-shell h1 { font-family: var(--font-display); font-size: 20px; margin-bottom: 4px; }
-  .auth-shell p { color: var(--muted); font-size: 13px; margin-top: 0; }
-  .field { margin: 14px 0; }
-  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
-  .field input {
-    width: 100%; background: var(--panel-raised); border: 1px solid var(--border);
-    border-radius: 6px; padding: 9px 10px; color: var(--text); font-family: var(--font-body);
-  }
-  .field input:focus { outline: 1px solid var(--teal); }
-  .auth-shell button {
-    width: 100%; background: var(--teal); border: none; color: #06211D;
-    font-weight: 600; padding: 10px; border-radius: 6px; cursor: pointer; margin-top: 6px;
-  }
-  .error-msg { color: var(--coral); font-size: 12.5px; margin-top: 8px; min-height: 16px; }
-  .admin-layout { max-width: 900px; margin: 0 auto; padding: 24px 28px 60px; display: flex; flex-direction: column; gap: 18px; }
-  .rule-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: var(--panel-raised); border-radius: 6px; font-size: 13px; margin-bottom: 6px; }
-  .rule-row button, .warn-actions button {
-    background: transparent; border: 1px solid var(--border); color: var(--muted);
-    padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
-  }
-  .rule-row button:hover { border-color: var(--coral); color: var(--coral); }
-  .warn-card { border: 1px solid var(--amber); background: rgba(245,166,35,0.08); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
-  .warn-card .warn-reason { font-size: 13px; margin-bottom: 8px; }
-  .warn-card pre { font-family: var(--font-mono); font-size: 11px; color: var(--muted); background: var(--panel-raised); padding: 8px; border-radius: 6px; overflow-x: auto; }
-  .warn-actions { display: flex; gap: 8px; }
-  .warn-actions .approve:hover { border-color: var(--green); color: var(--green); }
-  .warn-actions .deny:hover { border-color: var(--coral); color: var(--coral); }
-  .add-rule-row { display: flex; gap: 8px; margin-top: 10px; }
-  .add-rule-row input { flex: 1; background: var(--panel-raised); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; color: var(--text); }
-  .add-rule-row button { background: var(--teal); border: none; color: #06211D; font-weight: 600; padding: 8px 14px; border-radius: 6px; cursor: pointer; }
-  .topbar .brand-text small { color: var(--violet); }
-</style>
+<link rel="stylesheet" href="/static/admin.css?v=3" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">◆</span>
-      <div class="brand-text"><h1>Grid Control</h1><p>Admin console</p></div>
+      <div class="brand-icon"><div class="brand-icon-inner"></div></div>
+      <div>
+        <div class="brand-name">Grid Control</div>
+        <div class="brand-sub">Admin console</div>
+      </div>
     </div>
-    <div class="topbar-right"><a href="/">← Back to dashboard</a></div>
+    <div class="topbar-right">
+      <span class="agent-pill" id="agentPill" hidden>…</span>
+      <a class="admin-btn" href="/">← Dashboard</a>
+    </div>
   </header>
 
+  <!-- Session check -->
   <div id="checkingView" class="auth-shell panel">
     <p class="hint">Checking session…</p>
   </div>
 
+  <!-- Login -->
   <div id="loginView" class="auth-shell panel" hidden>
     <h1>Admin sign-in</h1>
-    <p>Restricted to authorized operators. High-criticality actions and guardrail rules live here.</p>
+    <p>Restricted to authorized operators.</p>
     <div class="field">
       <label for="username">User ID</label>
       <input id="username" type="text" autocomplete="username" />
@@ -70,29 +41,167 @@
       <label for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" />
     </div>
-    <button id="loginBtn">Sign in</button>
+    <button id="loginBtn" class="btn-primary full">Sign in</button>
     <div class="error-msg" id="loginError"></div>
   </div>
 
-  <div id="adminView" class="admin-layout" hidden>
-    <div class="panel">
-      <div class="panel-head">
-        <h2>⚠ Warnings needing a decision</h2>
-      </div>
-      <div id="warningsList"></div>
-    </div>
+  <!-- Console -->
+  <div id="adminView" class="console" hidden>
+    <nav class="side-nav" id="sideNav">
+      <button class="nav-item active" data-tab="overview">Overview</button>
+      <button class="nav-item" data-tab="approvals">Approvals <span class="nav-badge" id="navWarnBadge" hidden>0</span></button>
+      <button class="nav-item" data-tab="guardrails">Guardrails</button>
+      <button class="nav-item" data-tab="log">Decision log</button>
+      <button class="nav-item" data-tab="outcomes">Outcomes</button>
+      <button class="nav-item" data-tab="hotspots">Hot spots</button>
+      <button class="nav-item" data-tab="charts">Charts</button>
+      <button class="nav-item" data-tab="controls">Agent &amp; settings</button>
+      <div class="nav-spacer"></div>
+      <button class="nav-item signout" id="signOutBtn">Sign out</button>
+    </nav>
 
-    <div class="panel">
-      <h2>Guardrail "don't" rules</h2>
-      <p class="hint">Hard rules the agent must never violate on its own (e.g. "never shut down eu-west").</p>
-      <div id="rulesList"></div>
-      <div class="add-rule-row">
-        <input id="newRule" type="text" placeholder="Add a new rule…" />
-        <button id="addRuleBtn">Add</button>
-      </div>
-    </div>
+    <main class="tab-area">
+
+      <!-- 1. Overview -->
+      <section class="tab" id="tab-overview">
+        <h2 class="tab-title">Overview</h2>
+        <div class="stat-grid" id="ovStats"></div>
+        <div class="panel">
+          <div class="panel-title">Regions</div>
+          <div class="table-wrap"><table class="data-table" id="ovRegions"></table></div>
+        </div>
+      </section>
+
+      <!-- 2. Approvals -->
+      <section class="tab" id="tab-approvals" hidden>
+        <h2 class="tab-title">Approvals</h2>
+        <p class="hint">Actions the agent was not allowed to run on its own. Approve to execute, deny to discard.</p>
+        <div id="warningsList"></div>
+      </section>
+
+      <!-- 3. Guardrails -->
+      <section class="tab" id="tab-guardrails" hidden>
+        <h2 class="tab-title">Guardrails</h2>
+
+        <div class="panel">
+          <div class="panel-title">Action permissions</div>
+          <p class="hint">Decide which actions the agent may run on its own. "Needs admin approval" sends every such action to the Approvals tab instead of running it. Locked actions always need approval.</p>
+          <div id="policiesList"></div>
+          <div class="notice" id="policiesNotice" hidden></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Custom rules</div>
+          <p class="hint">Rules the agent must never break (for example: "never migrate to eu-west").</p>
+          <div id="rulesList"></div>
+          <div class="add-rule-row">
+            <input id="newRule" type="text" placeholder="Add a new rule…" />
+            <button id="addRuleBtn" class="btn-primary">Add</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 4. Decision log -->
+      <section class="tab" id="tab-log" hidden>
+        <h2 class="tab-title">Decision log</h2>
+        <div class="toolbar">
+          <div class="filter-group" id="logFilters">
+            <button class="chip-btn active" data-filter="all">All</button>
+            <button class="chip-btn" data-filter="executed">Executed</button>
+            <button class="chip-btn" data-filter="passed">Passed</button>
+            <button class="chip-btn" data-filter="blocked_for_admin">Blocked</button>
+            <button class="chip-btn" data-filter="error">Errors</button>
+          </div>
+          <input id="logSearch" type="text" placeholder="Search reasoning, action, task…" />
+        </div>
+        <p class="hint" id="logCount"></p>
+        <div class="log-list tall" id="logList"></div>
+      </section>
+
+      <!-- 5. Outcomes -->
+      <section class="tab" id="tab-outcomes" hidden>
+        <h2 class="tab-title">Outcomes</h2>
+        <p class="hint">What changed about 30 seconds after each executed action. Green means it helped.</p>
+        <div class="stat-grid" id="outSummary"></div>
+        <div class="feedback-list tall" id="feedbackList"></div>
+      </section>
+
+      <!-- 6. Hot spots -->
+      <section class="tab" id="tab-hotspots" hidden>
+        <h2 class="tab-title">Hot spots</h2>
+        <div class="two-col">
+          <div class="panel">
+            <div class="panel-title">Hottest chipsets</div>
+            <div id="hotChips"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-title">Hottest servers</div>
+            <div id="hotServers"></div>
+            <div class="panel-title spaced">Regions by average temperature</div>
+            <div id="hotRegions"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. Charts -->
+      <section class="tab" id="tab-charts" hidden>
+        <h2 class="tab-title">Charts</h2>
+        <p class="hint">Live trends collected while this page is open (about the last 9 minutes). They reset when you reload.</p>
+        <div class="two-col">
+          <div class="panel"><div class="panel-title">Temperature (°C)</div><div id="chTemp"></div></div>
+          <div class="panel"><div class="panel-title">Active tasks</div><div id="chTasks"></div></div>
+          <div class="panel"><div class="panel-title">Utilization by region (%)</div><div id="chUtil"></div></div>
+          <div class="panel"><div class="panel-title">Decisions by result</div><div id="chResults"></div><div class="panel-title spaced">Decisions by action</div><div id="chActions"></div></div>
+        </div>
+      </section>
+
+      <!-- 8. Agent & settings -->
+      <section class="tab" id="tab-controls" hidden>
+        <h2 class="tab-title">Agent &amp; settings</h2>
+
+        <div class="panel">
+          <div class="panel-title">Agent control</div>
+          <p class="hint">Resume starts the agent and a fresh telemetry buffer window. The first decision comes one full interval later. Pause stops new decisions.</p>
+          <div class="control-row">
+            <span class="agent-pill big" id="agentPillBig">…</span>
+            <button id="pauseBtn" class="btn-ghost">Pause agent</button>
+            <button id="resumeBtn" class="btn-primary">Resume agent</button>
+          </div>
+          <div class="notice" id="agentNotice" hidden></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Anomaly test</div>
+          <p class="hint">Forces a random chipset to 100°C and pins a runaway task on it. The agent reacts at its next decision (watch the countdown). The fault clears when the agent moves a task off that chip, or after 3 minutes.</p>
+          <div class="control-row">
+            <button id="anomalyBtn" class="btn-danger">⚡ Inject anomaly</button>
+            <button id="anomalyClearBtn" class="btn-ghost">Clear anomalies</button>
+            <span class="save-msg" id="anomalyMsg"></span>
+          </div>
+          <div id="anomalyList"></div>
+          <div class="notice" id="anomalyNotice" hidden></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Settings</div>
+          <p class="hint">Applied immediately, without a restart. They reset to the env file values when the server restarts.</p>
+          <div class="settings-grid">
+            <div class="field"><label for="setTemp">Temperature limit (°C)</label><input id="setTemp" type="number" step="1" min="30" max="120" /></div>
+            <div class="field"><label for="setImb">Utilization imbalance limit (0–1)</label><input id="setImb" type="number" step="0.01" min="0" max="1" /></div>
+            <div class="field"><label for="setProfit">Minimum net profit</label><input id="setProfit" type="number" step="0.01" /></div>
+            <div class="field"><label for="setInterval">Decision interval (seconds)</label><input id="setInterval" type="number" step="1" min="5" max="600" /></div>
+          </div>
+          <div class="control-row">
+            <button id="saveSettingsBtn" class="btn-primary">Save settings</button>
+            <span class="save-msg" id="settingsMsg"></span>
+          </div>
+          <div class="notice" id="settingsNotice" hidden></div>
+        </div>
+      </section>
+
+    </main>
   </div>
 
-  <script src="/static/admin.js?v=2"></script>
+  <script src="/static/admin.js?v=3"></script>
 </body>
 </html>

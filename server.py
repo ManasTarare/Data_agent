@@ -16,12 +16,13 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), ov
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from typing import Optional
 from pydantic import BaseModel
 
 from environment import DatacenterEnvironment
 from guardrails   import Guardrails
 from feedback     import FeedbackLoop
-from agent        import DatacenterAgent, TEMP_THRESHOLD_C, MIN_NET_PROFIT
+from agent        import DatacenterAgent
 from explainable  import ExplainableAI
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -34,6 +35,8 @@ CHIPSETS_PER_SERVER   = int(os.getenv("CHIPSETS_PER_SERVER", 4))
 BUFFER_WINDOW         = int(os.getenv("BUFFER_WINDOW_SECONDS", 5))
 DECISION_INTERVAL     = int(os.getenv("DECISION_INTERVAL_SECONDS", 5))
 FEEDBACK_WINDOW       = int(os.getenv("FEEDBACK_WINDOW_SECONDS", 30))
+# Set AGENT_AUTOSTART=0 in .env to start paused and use Resume in the admin page.
+AGENT_AUTOSTART       = os.getenv("AGENT_AUTOSTART", "1") not in ("0", "false", "False")
 
 # ── boot the simulation ───────────────────────────────────────────────────────
 print("Booting datacenter simulation …")
@@ -50,8 +53,9 @@ def _tick_loop():
         time.sleep(1.0)
 
 threading.Thread(target=_tick_loop, daemon=True).start()
-agent.run_forever()
-print("Simulation running ✓")
+if AGENT_AUTOSTART:
+    agent.run_forever()
+print("Simulation running ✓" + ("" if AGENT_AUTOSTART else " (agent paused)"))
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(title="Datacenter AI Agent")
@@ -96,6 +100,16 @@ class ResolveBody(BaseModel):
 class AskBody(BaseModel):
     question: str
 
+class SettingsBody(BaseModel):
+    temp_threshold_c: Optional[float] = None
+    util_imbalance_threshold: Optional[float] = None
+    min_net_profit: Optional[float] = None
+    decision_interval_seconds: Optional[int] = None
+
+class PolicyBody(BaseModel):
+    action: str
+    mode: str
+
 def _require_admin(authorization: str | None):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing admin token")
@@ -112,9 +126,10 @@ def get_state():
     return {
         "snapshot": snap,
         "decision_interval_seconds": agent.decision_interval,
-        "next_decision_in": agent.decision_interval - (int(time.time()) % agent.decision_interval),
+        "next_decision_in": agent.seconds_until_next_decision(),
+        "agent_running": agent.is_running,
         "open_warning_count": len(guardrails.open_warnings()),
-        "temp_threshold_c": TEMP_THRESHOLD_C,
+        "temp_threshold_c": agent.temp_threshold_c,
     }
 
 @app.get("/api/log")
@@ -148,7 +163,7 @@ def admin_warnings(authorization: str | None = Header(default=None)):
 _EXECUTABLE_ACTIONS = {
     "shift_within_server": lambda payload: env.shift_within_server(**payload),
     "shift_within_region": lambda payload: env.shift_within_region(**payload),
-    "migrate_region": lambda payload: env.migrate_region(**{**payload, "min_net_profit": MIN_NET_PROFIT}),
+    "migrate_region": lambda payload: env.migrate_region(**{**payload, "min_net_profit": agent.min_net_profit}),
 }
 
 
@@ -187,6 +202,73 @@ def admin_remove_dont(body: RuleBody,
     _require_admin(authorization)
     guardrails.remove_dont(body.rule)
     return {"rules": guardrails.admin_donts}
+
+# ── agent control ─────────────────────────────────────────────────────────────
+@app.get("/api/admin/agent")
+def admin_agent_status(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return {"running": agent.is_running}
+
+@app.post("/api/admin/agent/pause")
+def admin_agent_pause(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    agent.pause()
+    return {"running": agent.is_running}
+
+@app.post("/api/admin/agent/resume")
+def admin_agent_resume(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    agent.resume()
+    return {"running": agent.is_running}
+
+# ── settings ──────────────────────────────────────────────────────────────────
+@app.get("/api/admin/settings")
+def admin_get_settings(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return agent.get_settings()
+
+@app.post("/api/admin/settings")
+def admin_update_settings(body: SettingsBody,
+                           authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    try:
+        return agent.update_settings(body.dict(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+# ── action permissions ────────────────────────────────────────────────────────
+@app.get("/api/admin/policies")
+def admin_get_policies(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return {"policies": guardrails.get_policies()}
+
+@app.post("/api/admin/policies")
+def admin_set_policy(body: PolicyBody,
+                      authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    try:
+        guardrails.set_policy(body.action, body.mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"policies": guardrails.get_policies()}
+
+# ── anomaly injection (test tool) ─────────────────────────────────────────────
+@app.post("/api/admin/anomaly")
+def admin_inject_anomaly(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    result = env.inject_anomaly(temperature_c=100.0)
+    result["agent_running"] = agent.is_running
+    return result
+
+@app.get("/api/admin/anomalies")
+def admin_anomalies(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return {"anomalies": env.active_anomalies()}
+
+@app.post("/api/admin/anomaly/clear")
+def admin_clear_anomalies(authorization: str | None = Header(default=None)):
+    _require_admin(authorization)
+    return {"cleared": env.clear_anomalies()}
 
 # ── static files ──────────────────────────────────────────────────────────────
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")

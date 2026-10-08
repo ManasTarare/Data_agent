@@ -85,6 +85,13 @@ class Chipset:
     tasks: dict = field(default_factory=dict)   # task_id -> Task
     temperature_c: float = 45.0
     ambient_c: float = 22.0
+    # Injected thermal fault: while active, the chip can't cool below this.
+    anomaly_floor_c: float = 0.0
+    anomaly_expires_at: Optional[float] = None   # wall-clock time, None = no anomaly
+
+    @property
+    def anomaly_active(self) -> bool:
+        return self.anomaly_expires_at is not None and time.time() < self.anomaly_expires_at
 
     @property
     def load(self) -> float:
@@ -100,6 +107,21 @@ class Chipset:
         cooling = (self.temperature_c - self.ambient_c) * 0.08 * dt
         self.temperature_c += heat_gain - cooling
         self.temperature_c = max(self.ambient_c, self.temperature_c)
+
+        # Injected anomaly: hold the chip at the fault temperature until it is
+        # mitigated (a task is moved off it) or the anomaly times out.
+        if self.anomaly_expires_at is not None:
+            if self.anomaly_active:
+                self.temperature_c = max(self.temperature_c, self.anomaly_floor_c)
+            else:
+                self.anomaly_expires_at = None
+                self.anomaly_floor_c = 0.0
+
+    def clear_anomaly(self) -> bool:
+        was_active = self.anomaly_active
+        self.anomaly_expires_at = None
+        self.anomaly_floor_c = 0.0
+        return was_active
 
 
 @dataclass
@@ -266,6 +288,13 @@ class DatacenterEnvironment:
                         "temperature_c": round(c.temperature_c, 1),
                         "active_tasks": len(c.tasks),
                         "capacity": c.capacity,
+                        # Task ids are needed for shift/migrate actions; without
+                        # them the agent has no valid task_id to act on.
+                        "tasks": [
+                            {"id": t.id, "load": round(t.load, 1),
+                             "priority": t.priority, "locked": t.locked}
+                            for t in c.tasks.values() if not t.completed
+                        ],
                     } for cid, c in s.chipsets.items()
                 }
                 servers_state[sid] = {"tier": s.tier, "chipsets": chips_state}
@@ -291,6 +320,48 @@ class DatacenterEnvironment:
             self.live_buffer = deque(maxlen=self.buffer_window_seconds)
             return list(self.frozen_buffer)
 
+    # ---- anomaly injection (admin test tool) -------------------------------
+    def inject_anomaly(self, temperature_c: float = 100.0, duration_s: float = 180.0) -> dict:
+        """Simulate a runaway job: a random chipset is forced to `temperature_c`
+        and held there, and a long-running task is pinned on it. The agent has
+        to move that task away to fix it (the fault clears when it does, or
+        after `duration_s`)."""
+        with self._lock:
+            candidates = [x for x in self._all_chipsets() if not x[2].anomaly_active]
+            region, server, chip = random.choice(candidates or list(self._all_chipsets()))
+
+            task = Task(
+                id=str(uuid.uuid4())[:8],
+                type=TaskType.VIDEO_GEN,
+                load=round(random.uniform(10, 18), 1),
+                duration=duration_s,
+                remaining=duration_s,
+                priority=TASK_PROFILE[TaskType.VIDEO_GEN]["priority"],
+                created_at=time.time(),
+                chipset_id=chip.id, server_id=server.id, region_id=region.id,
+            )
+            chip.tasks[task.id] = task
+            self.tasks[task.id] = task
+
+            chip.temperature_c = temperature_c
+            chip.anomaly_floor_c = temperature_c
+            chip.anomaly_expires_at = time.time() + duration_s
+            return {"ok": True, "chipset_id": chip.id, "server_id": server.id,
+                    "region_id": region.id, "temperature_c": temperature_c,
+                    "runaway_task_id": task.id, "expires_in_s": duration_s}
+
+    def active_anomalies(self) -> list[dict]:
+        with self._lock:
+            now = time.time()
+            return [{"chipset_id": c.id, "server_id": s.id, "region_id": r.id,
+                     "temperature_c": round(c.temperature_c, 1),
+                     "seconds_left": max(0, int(c.anomaly_expires_at - now))}
+                    for r, s, c in self._all_chipsets() if c.anomaly_active]
+
+    def clear_anomalies(self) -> int:
+        with self._lock:
+            return sum(1 for _, _, c in self._all_chipsets() if c.clear_anomaly())
+
     # ---- action primitives (called only by the agent's executor) ---------
     def shift_within_server(self, from_chipset_id: str, to_chipset_id: str, task_id: str) -> dict:
         with self._lock:
@@ -311,8 +382,11 @@ class DatacenterEnvironment:
             c_to.tasks[task_id] = task
             task.chipset_id = to_chipset_id
             task.locked = True  # cannot be re-shifted until it completes
-            return {"ok": True, "action": "shift_within_server", "task_id": task_id,
-                     "from": from_chipset_id, "to": to_chipset_id}
+            result = {"ok": True, "action": "shift_within_server", "task_id": task_id,
+                      "from": from_chipset_id, "to": to_chipset_id}
+            if c_from.clear_anomaly():
+                result["anomaly_cleared"] = True
+            return result
 
     def shift_within_region(self, from_server_id: str, to_server_id: str, task_id: str) -> dict:
         with self._lock:
@@ -337,8 +411,11 @@ class DatacenterEnvironment:
             c_to.tasks[task_id] = task
             task.chipset_id, task.server_id = c_to.id, to_server_id
             task.locked = True
-            return {"ok": True, "action": "shift_within_region", "task_id": task_id,
-                     "from": from_server_id, "to": to_server_id}
+            result = {"ok": True, "action": "shift_within_region", "task_id": task_id,
+                      "from": from_server_id, "to": to_server_id}
+            if c_from.clear_anomaly():
+                result["anomaly_cleared"] = True
+            return result
 
     def migrate_region(self, from_region_id: str, to_region_id: str, task_id: str,
                         bandwidth_cost_estimate: float, projected_savings: float,
@@ -377,5 +454,8 @@ class DatacenterEnvironment:
             c_to.tasks[task_id] = task
             task.chipset_id, task.server_id, task.region_id = c_to.id, dest_server.id, to_region_id
             task.locked = True
-            return {"ok": True, "action": "migrate_region", "task_id": task_id,
-                     "from": from_region_id, "to": to_region_id, "net_profit": net_profit}
+            result = {"ok": True, "action": "migrate_region", "task_id": task_id,
+                      "from": from_region_id, "to": to_region_id, "net_profit": net_profit}
+            if c_from.clear_anomaly():
+                result["anomaly_cleared"] = True
+            return result

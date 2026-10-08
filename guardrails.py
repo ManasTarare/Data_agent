@@ -58,6 +58,26 @@ HIGH_CRITICALITY_ACTIONS = {
 }
 
 
+# Actions the agent can really propose. The admin can switch each one between
+# "autonomous" (agent runs it) and "approval" (always becomes a warning).
+DEFAULT_POLICIES = {
+    "shift_within_server": "autonomous",
+    "shift_within_region": "autonomous",
+    "migrate_region": "autonomous",
+}
+
+ACTION_INFO = {
+    "shift_within_server": "Move a task to a cooler chipset on the same server.",
+    "shift_within_region": "Move a task to another server in the same region.",
+    "migrate_region": "Move a task to another region (only when net profit clears the minimum).",
+    "shutdown_server": "Shut a server down.",
+    "shutdown_region": "Shut a whole region down.",
+    "move_entire_server": "Move every task off a server.",
+    "move_entire_region": "Move every task out of a region.",
+    "delete_task": "Delete a task.",
+}
+
+
 @dataclass
 class Warning:
     id: str
@@ -73,6 +93,7 @@ class Guardrails:
     def __init__(self, store_path: str = "guardrails_state.json"):
         self.store_path = store_path
         self.admin_donts: list[str] = []   # free-text rules, e.g. "never migrate out of eu-west"
+        self.policies: dict[str, str] = dict(DEFAULT_POLICIES)
         self.warnings: list[Warning] = []
         self._load()
 
@@ -82,12 +103,16 @@ class Guardrails:
             with open(self.store_path) as f:
                 data = json.load(f)
                 self.admin_donts = data.get("admin_donts", [])
+                for action, mode in data.get("action_policies", {}).items():
+                    if action in DEFAULT_POLICIES and mode in ("autonomous", "approval"):
+                        self.policies[action] = mode
         except FileNotFoundError:
             pass
 
     def _save(self):
         with open(self.store_path, "w") as f:
-            json.dump({"admin_donts": self.admin_donts}, f, indent=2)
+            json.dump({"admin_donts": self.admin_donts,
+                       "action_policies": self.policies}, f, indent=2)
 
     # ---- admin API -----------------------------------------------------
     def add_dont(self, rule: str):
@@ -98,6 +123,25 @@ class Guardrails:
         if rule in self.admin_donts:
             self.admin_donts.remove(rule)
             self._save()
+
+    def get_policies(self) -> list[dict]:
+        """Every decided action with its current mode. High-criticality
+        actions are locked: they always need Admin approval."""
+        rows = [{"action": a, "mode": m, "locked": False,
+                 "description": ACTION_INFO.get(a, "")}
+                for a, m in self.policies.items()]
+        rows += [{"action": a, "mode": "approval", "locked": True,
+                  "description": ACTION_INFO.get(a, "")}
+                 for a in sorted(HIGH_CRITICALITY_ACTIONS)]
+        return rows
+
+    def set_policy(self, action: str, mode: str):
+        if action not in DEFAULT_POLICIES:
+            raise ValueError(f"'{action}' cannot be edited")
+        if mode not in ("autonomous", "approval"):
+            raise ValueError("mode must be 'autonomous' or 'approval'")
+        self.policies[action] = mode
+        self._save()
 
     def resolve_warning(self, warning_id: str, decision: str) -> "Warning | None":
         """Marks the warning resolved and returns it (so the caller can act
@@ -146,6 +190,12 @@ class Guardrails:
                 w = self._raise_warning(action_name, payload,
                                          f"Matches admin rule: '{rule}'")
                 return {"verdict": "block", "warning": w}
+
+        # Admin switched this action type to "needs approval".
+        if self.policies.get(action_name) == "approval":
+            w = self._raise_warning(action_name, payload,
+                                     "Admin requires approval for this action type.")
+            return {"verdict": "block", "warning": w}
 
         if action_name not in LOW_CRITICALITY_ACTIONS:
             w = self._raise_warning(action_name, payload, "Unrecognized action type.")
